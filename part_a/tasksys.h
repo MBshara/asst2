@@ -3,6 +3,8 @@
 
 #include "itasksys.h"
 #include <mutex>
+#include <thread>
+#include <condition_variable>
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -66,6 +68,7 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
         std::condition_variable* condition_variable;
         std::mutex* mutex;
         std::mutex* mutex2;
+        std::mutex* task_mutex;
 
         void run(IRunnable* runnable, int num_total_tasks);
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,

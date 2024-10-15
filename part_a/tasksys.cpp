@@ -144,8 +144,10 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
     condition_variable = new std::condition_variable();
     mutex = new std::mutex();
     mutex2 = new std::mutex();
+    task_mutex = new std::mutex();
     tasks_left = new int;
     *tasks_left = -1;
+    total_tasks = -1;
     count = new int;
     *count = 0;
     work_exists = true;
@@ -167,6 +169,7 @@ TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
     delete count;
     delete mutex;
     delete mutex2;
+    delete task_mutex;
 }
 
 void TaskSystemParallelThreadPoolSpinning::run_polling(){
@@ -184,17 +187,17 @@ void TaskSystemParallelThreadPoolSpinning::run_polling(){
         if(index<curr_total){ // If the index "can be run"
             // then access that work
             running->runTask(index,curr_total);  // running that work
-            mutex2->lock(); 
+            task_mutex->lock(); 
             *tasks_left-=1; //Update the amount of tasks left to do
             if(*tasks_left == 0){ // If no tasks are left, ONLY RUNS ONCE
-                mutex2->unlock();
+                task_mutex->unlock();
                 {
                     std::lock_guard<std::mutex> lk(*mutex); // make sure that thread 1 is sleeping
                 } // Unlocks the lock
                 condition_variable->notify_all(); // notify thread 1 to wake up 
             }
             else{
-                mutex2->unlock();
+                task_mutex->unlock();
             }
         }
     }
@@ -208,11 +211,13 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     // tasks sequentially on the calling thread.
     //
     std::unique_lock<std::mutex> lk(*mutex);
+    task_mutex -> lock();
+    *tasks_left = num_total_tasks;
+    task_mutex -> unlock();
     mutex2->lock();
     running = runnable;
     *count = 0;
     total_tasks = num_total_tasks;
-    *tasks_left = num_total_tasks;
     mutex2->unlock();
     //printf("Entered\n"); //DEBUG
     condition_variable->wait(lk);
