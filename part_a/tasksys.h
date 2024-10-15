@@ -2,6 +2,7 @@
 #define _TASKSYS_H
 
 #include "itasksys.h"
+#include <mutex>
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -30,9 +31,16 @@ class TaskSystemParallelSpawn: public ITaskSystem {
         TaskSystemParallelSpawn(int num_threads);
         ~TaskSystemParallelSpawn();
         const char* name();
+        int num_threads;
+        std::thread* threads;
+        std::mutex* global_mutex;
         void run(IRunnable* runnable, int num_total_tasks);
+        void run_thread_static(IRunnable* runnable, int step, int start, int num_total_tasks);
+        void run_thread_dynamic(IRunnable* runnable, int* count, int num_total_tasks);
+
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
+        void run_thread_evenly(IRunnable* runnable, int num_total_tasks);
         void sync();
 };
 
@@ -47,9 +55,22 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
         TaskSystemParallelThreadPoolSpinning(int num_threads);
         ~TaskSystemParallelThreadPoolSpinning();
         const char* name();
+
+        int num_threads;
+        IRunnable* running;
+        std::thread* thread_pool;
+        bool work_exists;
+        int total_tasks;
+        int* tasks_left;
+        int* count;
+        std::condition_variable* condition_variable;
+        std::mutex* mutex;
+        std::mutex* mutex2;
+
         void run(IRunnable* runnable, int num_total_tasks);
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
+        void run_polling();
         void sync();
 };
 
@@ -67,6 +88,23 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         void run(IRunnable* runnable, int num_total_tasks);
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
+        void run_sleeping();
+
+        IRunnable* running;
+        std::thread* thread_pool;
+        std::mutex* global_mutex;
+        std::mutex* done;
+        std::mutex* alarm;
+        std::condition_variable* wake_signal;
+        std::condition_variable* finish_signal;
+        int* count;
+        int* tasks_left;
+
+        bool work_exists;
+        int num_of_threads;
+        int total_tasks;
+        bool can_sleep;
+        
         void sync();
 };
 
