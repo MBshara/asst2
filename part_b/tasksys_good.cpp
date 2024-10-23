@@ -133,11 +133,15 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
-    thread_manager = new TaskManager();
     curr_run_id = 0;
+    latest_finished = -1;
     num_of_threads = num_threads;
     work_exists = true;
-    // finished = new std::mutex();
+    waiting_mutex = new std::mutex();
+    executing_mutex = new std::mutex();
+    finished = new std::mutex();
+    waiting_sleep = new std::condition_variable();
+    syncing_sleep = new std::condition_variable();
     thread_pool = new std::thread[num_threads];
     for(int i = 0; i<num_threads; i++){
         thread_pool[i] = std::thread(&TaskSystemParallelThreadPoolSleeping::worker_thread, this);
@@ -152,76 +156,107 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     // (requiring changes to tasksys.h).
     //
     work_exists = false;
+    //sync();
     {
-        std::lock_guard<std::mutex> lock(*(thread_manager->sleeping_mutex));
-        thread_manager->sleeping_thread->notify_all();
+        std::lock_guard<std::mutex> lock(*waiting_mutex);
+        waiting_sleep->notify_all();
     }
     for(int i = 0; i<num_of_threads; i++){
         thread_pool[i].join();
     }
     delete[] thread_pool;
-    delete  thread_manager;
+    delete executing_mutex;
+    delete waiting_mutex;
+    delete waiting_sleep;
+    delete syncing_sleep;
+    delete finished;
 }
-
+Executing_Run* TaskSystemParallelThreadPoolSleeping::update_executing_vec(){
+    for (auto it = executing_vec.begin(); it != executing_vec.end(); ) {
+        if ((*it)->count >= (*it)->num_total_tasks) {
+            // Remove the element and get the iterator to the next element.
+            it = executing_vec.erase(it);
+        } else {
+            return *it;
+        }
+    }
+    return nullptr;
+}
 void TaskSystemParallelThreadPoolSleeping::worker_thread(){
-    Task_Element local_elem;
+    Executing_Run* local_pt = nullptr;
+    bool killed = true;
+    Executing_Run local(nullptr,-1,-1,-1);
     while(work_exists){
-        if((local_elem=thread_manager->fetch_work()).myID >= 0){
-            local_elem.runnable->runTask(local_elem.count,local_elem.num_total_tasks);
-            thread_manager->task_finished->lock();
-            auto it = thread_manager->working_rn.find(local_elem.myID);
-            if (it == thread_manager->working_rn.end()) {
-                thread_manager->working_rn[local_elem.myID] = 1;
-                thread_manager->task_finished->unlock();
+        if(killed){
+            executing_mutex->lock();
+            if(!executing_vec.empty()){
+                local_pt = update_executing_vec();
+                if(local_pt!=nullptr){
+                    killed = false;
+                    local = *local_pt;
+                    local_pt->count++;
+                    local_pt->num_of_threads++;
+                }
+                executing_mutex->unlock();
             }
             else{
-                thread_manager->working_rn[local_elem.myID] += 1;
-                if(thread_manager->working_rn[local_elem.myID] == local_elem.num_total_tasks){
-                    thread_manager->task_finished->unlock();
-                    thread_manager->run_finished->lock();
-
-                    thread_manager->runs_finished.insert(local_elem.myID);
-                    thread_manager->latest_finished++;
-                    if(thread_manager->latest_finished+1 == curr_run_id){
-                        thread_manager->finishing->notify_all();
-                    }
-                    thread_manager->run_finished->unlock();
-                    std::unique_lock<std::mutex> lock2(*thread_manager->waiting_mutex);
-                    auto it = thread_manager->dependency_map.find(local_elem.myID);
-                    if (it !=  thread_manager->dependency_map.end()) {
-                        bool new_elem = false;
-                        for (TaskID dependent : it->second) {
-                            thread_manager->dependency_count[dependent]--;
-                            if (thread_manager->dependency_count[dependent] == 0) {
-                                if(new_elem==false){
-                                    thread_manager->executing_mutex->lock();
-                                    new_elem = true;
-                                }
-                                thread_manager->executing_vec.push(thread_manager->waiting_vec[dependent]);
-                                thread_manager->waiting_vec.erase(dependent);
-                            }
+                std::unique_lock<std::mutex> lock(*waiting_mutex);
+                if(!waiting_vec.empty()){
+                    for(auto it = waiting_vec.begin(); it != waiting_vec.end();){
+                        if(it->dependency<=latest_finished){
+                            executing_vec.push_back(new Executing_Run(it->runnable,it->num_total_tasks,0,it->myID));
+                            waiting_vec.erase(it);
                         }
-                        if(new_elem){
-                            thread_manager->sleeping_thread->notify_all();
-                            thread_manager->executing_mutex->unlock();
+                        else{
+                            break;
                         }
-                        thread_manager->dependency_map.erase(it->first);
                     }
-                    else{
-                        lock2.unlock();
-                        std::unique_lock<std::mutex> lock(*(thread_manager->sleeping_mutex));
-                        thread_manager->sleeping_thread->wait(lock);
+                    lock.unlock();
+                    if(!executing_vec.empty()){
+                        killed = false;
+                        local_pt = executing_vec.front();
+                        local = *local_pt;
+                        local_pt->count++;
+                        local_pt->num_of_threads++;
                     }
+                    executing_mutex->unlock();
                 }
                 else{
-                    thread_manager->task_finished->unlock();
+                    executing_mutex->unlock();
+                    if(work_exists){
+                        waiting_sleep->wait(lock);
+                    }
                 }
             }
         }
-        else{
-            std::unique_lock<std::mutex> lock(*(thread_manager->sleeping_mutex));
-            if(work_exists){
-                thread_manager->sleeping_thread->wait(lock);
+        if(!killed){
+            local.runnable->runTask(local.count, local.num_total_tasks);
+            killed = false;
+            finished->lock();
+            local_pt->tasks_finished--;
+            if(local_pt->tasks_finished == 0){
+                latest_finished=latest_finished+1;
+                if(curr_run_id==latest_finished+1){
+                    syncing_sleep->notify_one();
+                }
+            }
+            finished->unlock();
+            executing_mutex->lock();
+            if(local_pt->count < local_pt->num_total_tasks){
+                local = *local_pt;
+                local_pt->count++;
+                executing_mutex->unlock();
+            }
+            else{
+                local_pt->num_of_threads--;
+                if(local_pt->num_of_threads==0){
+                    executing_mutex->unlock();
+                    delete local_pt;
+                }
+                else{
+                    executing_mutex->unlock();
+                }
+                killed = true;
             }
         }
     }
@@ -246,33 +281,18 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     //
     // TODO: CS149 students will implement this method in Part B.
     //
-    thread_manager->run_finished->lock();
-    bool not_found = true;
-    for(TaskID dep : deps) {
-        if(thread_manager->runs_finished.find(dep)==thread_manager->runs_finished.end()){
-            if(not_found){
-                thread_manager->waiting_mutex->lock();
-                not_found = false;
-            }
-            thread_manager->dependency_map[dep].insert(curr_run_id);
-        }
+    TaskID latest_dependency = -1;
+    //bool local_thread_sleeping = false;
+    if(!deps.empty()){
+        latest_dependency = *std::max_element(deps.begin(),deps.end());
     }
-    thread_manager->run_finished->unlock();
-    if(not_found){
-        thread_manager->executing_mutex->lock();
-        thread_manager->executing_vec.push(Task_Element(runnable,num_total_tasks,0,curr_run_id));
-        // wake up sleeping threads
-        thread_manager->executing_mutex->unlock();
-         {
-            std::lock_guard<std::mutex> lock(*(thread_manager->sleeping_mutex));
-            thread_manager->sleeping_thread->notify_all();
-        }
-    }
-    else{
-        thread_manager->dependency_count[curr_run_id] = deps.size();
-        thread_manager->waiting_vec[curr_run_id] = Task_Element(runnable,num_total_tasks,0,curr_run_id);
-        thread_manager->waiting_mutex->unlock();
-    }
+    Waiting_Run task(runnable,num_total_tasks,latest_dependency,curr_run_id);
+    waiting_mutex->lock();
+    waiting_vec.push_back(task);
+    waiting_mutex->unlock();
+    waiting_sleep->notify_all();
+
+
     return curr_run_id++;
 }
 
@@ -282,12 +302,12 @@ void TaskSystemParallelThreadPoolSleeping::sync() {
     //
     // TODO: CS149 students will modify the implementation of this method in Part B.
     //
-    std::unique_lock<std::mutex> lock(*(thread_manager->run_finished));
-    if(thread_manager->latest_finished + 1 == curr_run_id){
+    std::unique_lock<std::mutex> lock(*finished);
+    if(latest_finished + 1 == curr_run_id){
         return;
     }
     else{
-        thread_manager->finishing->wait(lock);
+        syncing_sleep->wait(lock);
     }
     return;
 }
