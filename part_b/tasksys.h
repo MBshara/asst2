@@ -63,6 +63,9 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
 #include <thread>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
+#include <condition_variable>
+#include <deque>
 #include <queue>
 struct Waiting_Run{
     IRunnable* runnable;
@@ -145,7 +148,6 @@ public:
     }
 
     Task_Element fetch_work(){
-        std::lock_guard<std::mutex> lock(*executing_mutex);
         while (!executing_vec.empty()) {
             Task_Element elem = executing_vec.front();
             if(elem.count<elem.num_total_tasks){
